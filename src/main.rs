@@ -24,6 +24,29 @@ fn ansi_style_for_path(lscolors: &LsColors, path: &Path) -> ansi_term::Style {
         .unwrap_or_default()
 }
 
+/// Neutralize control characters in a path before it is printed to the
+/// terminal. Path strings come from untrusted input (e.g. `find . | as-tree`),
+/// and on Unix a filename may contain any byte except `/` and NUL -- including
+/// ESC. Printing those raw lets a crafted filename inject terminal escape
+/// sequences (color/output spoofing, OSC title or clipboard writes, carriage
+/// return line rewrites). Control characters are rendered as visible escapes
+/// (e.g. ESC -> `\u{1b}`); printable text, including non-ASCII Unicode, is left
+/// untouched.
+fn escape_control(s: &str) -> String {
+    if !s.chars().any(char::is_control) {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_control() {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 impl PathTrie {
     fn contains_singleton_dir(&self) -> bool {
         self.trie.len() == 1 && !self.trie.iter().next().unwrap().1.trie.is_empty()
@@ -58,10 +81,10 @@ impl PathTrie {
             let contains_singleton_dir = it.contains_singleton_dir();
 
             let painted = match full_path {
-                false => style.paint(path.to_string_lossy()),
+                false => style.paint(escape_control(&path.to_string_lossy())),
                 true => match contains_singleton_dir && !join_with_parent {
-                    false => style.paint(current_path.to_string_lossy()),
-                    true => style.paint(""),
+                    false => style.paint(escape_control(&current_path.to_string_lossy())),
+                    true => style.paint(String::new()),
                 },
             };
 
@@ -178,4 +201,28 @@ fn main() -> io::Result<()> {
     trie.print(&lscolors, options.full_path);
 
     io::Result::Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::escape_control;
+
+    #[test]
+    fn leaves_printable_text_untouched() {
+        assert_eq!(escape_control("normal.txt"), "normal.txt");
+        // Non-ASCII printable characters must survive unchanged.
+        assert_eq!(escape_control("café/ñoño/中文/🦀"), "café/ñoño/中文/🦀");
+        // The lossy UTF-8 replacement character is printable, not control.
+        assert_eq!(escape_control("a\u{fffd}b"), "a\u{fffd}b");
+    }
+
+    #[test]
+    fn escapes_control_characters() {
+        // No raw control byte may appear in the output.
+        assert_eq!(escape_control("\u{1b}[31mred"), "\\u{1b}[31mred"); // ESC
+        assert_eq!(escape_control("a\u{7}b"), "a\\u{7}b"); // BEL
+        assert_eq!(escape_control("REAL\rFAKE"), "REAL\\rFAKE"); // CR
+        assert_eq!(escape_control("x\u{7f}y"), "x\\u{7f}y"); // DEL
+        assert!(!escape_control("\u{1b}]0;title\u{7}").contains('\u{1b}'));
+    }
 }

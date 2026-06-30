@@ -15,9 +15,9 @@
 # control byte in the output came straight from the input path. Each test
 # asserts the SECURE behavior (control bytes neutralized).
 #
-# STATUS: OPEN. These tests are EXPECTED TO FAIL until path output escapes
-# non-printable bytes (mirroring `ls -q`). This script is the red->green
-# acceptance test for that fix and should land together with it.
+# RESOLVED by escaping control characters in path output before printing
+# (src/main.rs: escape_control). This script is the acceptance test for that
+# fix and lands together with it; it must stay green.
 #
 # Usage:
 #   ./test/security/escape_injection.sh
