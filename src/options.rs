@@ -103,7 +103,7 @@ pub fn parse_options_or_die() -> Options {
             continue;
         }
 
-        if &arg[..1] == "-" {
+        if arg.starts_with('-') {
             die("Unrecognized option:", &arg);
         }
 
