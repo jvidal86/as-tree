@@ -32,12 +32,10 @@ fn run(args: &[&str], stdin: &str) -> Run {
         .stderr(Stdio::piped())
         .spawn()
         .expect("failed to spawn as-tree");
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(stdin.as_bytes())
-        .unwrap();
+    // The child may exit before reading stdin (e.g. an arg-validation error
+    // exits immediately), which makes this write fail with BrokenPipe. That is
+    // expected, so ignore the result; the temporary closes stdin (EOF) on drop.
+    let _ = child.stdin.take().unwrap().write_all(stdin.as_bytes());
     let out = child.wait_with_output().unwrap();
     Run {
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
