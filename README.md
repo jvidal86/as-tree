@@ -186,9 +186,10 @@ assets that the quick installer downloads.
 ## Roadmap
 
 - [x] Prebuilt release binaries + `wget` installer.
-- [ ] Publish to crates.io (`cargo install as-tree`).
 - [ ] Only use box-drawing characters when the locale supports them (`LC_CTYPE=C`).
 - [ ] A `-0` flag for NUL-separated input, to support paths containing newlines.
+
+Publishing to crates.io is left to the upstream project ([jez/as-tree](https://github.com/jez/as-tree)) — this fork does not claim the `as-tree` crate name.
 
 ## Acknowledgements
 
