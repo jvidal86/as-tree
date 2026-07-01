@@ -177,6 +177,20 @@ cd third_party/cargo
 cargo raze
 ```
 
+### Releasing
+
+Pushing a tag builds the prebuilt binaries and publishes them as a GitHub
+release (see [`.github/workflows/release.yml`](.github/workflows/release.yml)),
+which is what the quick installer downloads:
+
+```shell
+git tag 0.13.0
+git push origin 0.13.0
+```
+
+The workflow builds `linux`/`macos` × `x86_64`/`aarch64` and uploads the
+`as-tree-<os>-<arch>.tar.gz` assets.
+
 ## Roadmap
 
 - [ ] Publish to crates.io (`cargo install as-tree`).

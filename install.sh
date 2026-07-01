@@ -6,7 +6,7 @@
 #
 # Environment overrides:
 #   PREFIX=$HOME/.local   install under $PREFIX/bin (default: /usr/local)
-#   VERSION=v0.12.0       install a specific release tag (default: latest)
+#   VERSION=0.12.0        install a specific release tag (default: latest)
 #
 # NOTE: this needs a published GitHub release that ships assets named
 #   as-tree-<linux|macos>-<x86_64|aarch64>.tar.gz  (each containing the
