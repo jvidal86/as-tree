@@ -1,4 +1,5 @@
 use std::env;
+use std::path::PathBuf;
 use std::process::exit;
 use std::str::FromStr;
 
@@ -32,7 +33,7 @@ impl Default for Colorize {
 
 #[derive(Debug, Default)]
 pub struct Options {
-    pub filename: Option<String>,
+    pub filename: Option<PathBuf>,
     pub colorize: Colorize,
     pub full_path: bool,
     // Maximum tree depth to print, counted in path components from the top.
@@ -67,7 +68,15 @@ pub fn parse_options_or_die() -> Options {
         exit(1);
     }
 
-    let mut argv = env::args();
+    // `env::args()` panics if any argument isn't valid Unicode, which is a
+    // real crash on Linux/macOS: argv is raw bytes with no encoding enforced
+    // by the kernel, so a legacy-encoded or crafted filename can crash the
+    // parser before any of our own validation runs. `args_os()` never panics;
+    // flags are always plain ASCII, so a non-UTF-8 argument simply can't match
+    // one and falls through to being treated as the filename, which itself
+    // does not require valid Unicode either (`File::open` accepts raw OS
+    // strings via `AsRef<Path>`).
+    let mut argv = env::args_os();
 
     if argv.next().is_none() {
         eprint!("{}", USAGE);
@@ -77,57 +86,61 @@ pub fn parse_options_or_die() -> Options {
     let mut options = Options::default();
     while let Some(arg) = argv.next() {
         if arg.is_empty() {
-            die("Unrecognized argument:", &arg);
+            die("Unrecognized argument:", &arg.to_string_lossy());
         }
 
-        if arg == "-h" || arg == "--help" {
+        let arg_str = arg.to_str();
+
+        if arg_str == Some("-h") || arg_str == Some("--help") {
             print!("{}", USAGE);
             exit(0);
         }
 
-        if arg == "-v" || arg == "--version" {
+        if arg_str == Some("-v") || arg_str == Some("--version") {
             println!("{}", VERSION);
             exit(0);
         }
 
-        if arg == "-f" {
+        if arg_str == Some("-f") {
             options.full_path = true;
             continue;
         }
 
-        if arg == "--color" {
+        if arg_str == Some("--color") {
             if let Some(color) = argv.next() {
-                match color.parse() {
-                    Ok(colorize) => options.colorize = colorize,
-                    Err(()) => die("Unrecognized option: --color", &color),
+                match color.to_str().and_then(|c| c.parse().ok()) {
+                    Some(colorize) => options.colorize = colorize,
+                    None => die("Unrecognized option: --color", &color.to_string_lossy()),
                 }
             } else {
-                die("-> Unrecognized option:", &arg);
+                die("-> Unrecognized option:", "--color");
             }
             continue;
         }
 
-        if arg == "-L" {
+        if arg_str == Some("-L") {
             match argv.next() {
-                Some(level) => match level.parse::<usize>() {
-                    Ok(n) if n > 0 => options.max_level = Some(n),
-                    Ok(_) => die("Invalid level, must be greater than 0:", &level),
-                    Err(_) => die("Invalid level for -L:", &level),
+                Some(level) => match level.to_str().map(str::parse::<usize>) {
+                    Some(Ok(n)) if n > 0 => options.max_level = Some(n),
+                    Some(Ok(_)) => {
+                        die("Invalid level, must be greater than 0:", &level.to_string_lossy())
+                    }
+                    _ => die("Invalid level for -L:", &level.to_string_lossy()),
                 },
-                None => die("Missing value for -L:", &arg),
+                None => die("Missing value for -L:", "-L"),
             }
             continue;
         }
 
-        if arg.starts_with('-') {
-            die("Unrecognized option:", &arg);
+        if arg_str.map(|s| s.starts_with('-')).unwrap_or(false) {
+            die("Unrecognized option:", &arg.to_string_lossy());
         }
 
         if options.filename.is_some() {
-            die("Extra argument:", &arg);
+            die("Extra argument:", &arg.to_string_lossy());
         }
 
-        options.filename = Some(arg.to_string());
+        options.filename = Some(PathBuf::from(arg));
     }
 
     options

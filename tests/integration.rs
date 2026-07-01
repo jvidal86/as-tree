@@ -65,6 +65,54 @@ fn fixtures() {
 }
 
 #[test]
+fn deeply_nested_single_line_does_not_crash() {
+    // Regression: a single input line with many thousands of `/`-separated
+    // components used to overflow the native call stack -- both while
+    // printing (unbounded recursion in `_print`) and, independently, while
+    // dropping the resulting `PathTrie` (the compiler-generated recursive
+    // drop glue for the nested `BTreeMap<PathBuf, PathTrie>`). Confirmed
+    // crashing (SIGABRT, exit 134) at ~15,000 components before the fix, in
+    // both debug and release builds. 30,000 is comfortably past that
+    // threshold and still fast (well under a second).
+    let deep = std::iter::repeat("a").take(30_000).collect::<Vec<_>>().join("/");
+    let out = run(&["--color", "never"], &format!("{deep}\n"));
+    assert_ne!(out.code, 101, "panicked (debug unwind): {}", out.stderr);
+    assert_ne!(out.code, 134, "aborted, likely stack overflow: {}", out.stderr);
+    assert_eq!(out.code, 0, "expected success, got: {}", out.stderr);
+}
+
+#[test]
+fn directory_as_filename_does_not_hang() {
+    // Regression: a directory fd returns EISDIR on every read, never Ok(0)
+    // (EOF). `input.lines().filter_map(Result::ok)` used to silently discard
+    // that error and immediately re-poll, spinning forever at ~100% CPU with
+    // no output. Verify it now fails promptly instead of hanging -- polled
+    // with a hard deadline so a regression fails this test rather than
+    // hanging `cargo test` itself.
+    let mut child = Command::new(BIN)
+        .arg(manifest_dir().join("src"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn as-tree");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            assert!(!status.success(), "expected a directory input to fail, not succeed");
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("as-tree hung on a directory input (still running after 5s)");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[test]
 fn version_matches_crate() {
     let v = env!("CARGO_PKG_VERSION");
     assert_eq!(run(&["-v"], "").stdout.trim(), v);
@@ -159,6 +207,33 @@ fn broken_pipe_does_not_panic() {
     );
     // 101 is Rust's unwind-panic exit code (test/debug build uses panic=unwind).
     assert_ne!(status.code(), Some(101), "as-tree panicked on a broken pipe");
+}
+
+#[test]
+#[cfg(unix)]
+fn invalid_utf8_arg_does_not_panic() {
+    // Regression: std::env::args() panics on any argument that is not valid
+    // Unicode, which is reachable on Unix since argv is raw bytes with no
+    // encoding enforced by the kernel. Build a genuinely invalid-UTF-8
+    // argument (a lone 0xFF, 0xFE pair -- not a valid UTF-8 sequence) and
+    // confirm it no longer crashes the parser.
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let bad_arg = OsString::from_vec(vec![0xFF, 0xFE]);
+    let mut child = Command::new(BIN)
+        .arg(&bad_arg)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn as-tree");
+    drop(child.stdin.take());
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(!stderr.contains("panicked"), "panicked on non-UTF-8 arg: {stderr}");
+    assert_ne!(out.status.code(), Some(101), "panicked on non-UTF-8 arg: {stderr}");
 }
 
 #[test]

@@ -17,6 +17,24 @@ pub struct PathTrie {
     trie: BTreeMap<PathBuf, PathTrie>,
 }
 
+impl Drop for PathTrie {
+    /// The compiler-generated drop glue for a nested `BTreeMap<PathBuf,
+    /// PathTrie>` is recursive -- one native stack frame per level of
+    /// nesting -- and can overflow the stack for a pathologically deep input
+    /// (a single line with many thousands of `/`-separated components),
+    /// independently of how `_print`/`insert` are implemented. Drain the
+    /// tree iteratively instead: move each node's children onto a
+    /// heap-allocated work list before that node is dropped, so by the time
+    /// its own (recursive, compiler-generated) drop glue runs there is
+    /// nothing left in it to recurse into.
+    fn drop(&mut self) {
+        let mut pending: Vec<PathTrie> = std::mem::take(&mut self.trie).into_values().collect();
+        while let Some(mut node) = pending.pop() {
+            pending.extend(std::mem::take(&mut node.trie).into_values());
+        }
+    }
+}
+
 fn ansi_style_for_path(lscolors: &LsColors, path: &Path) -> ansi_term::Style {
     lscolors
         .style_for_path(&path)
@@ -67,28 +85,90 @@ impl PathTrie {
         }
     }
 
-    fn _print(
-        &self,
-        top: bool,
-        prefix: &str,
-        join_with_parent: bool,
-        lscolors: &LsColors,
-        parent_path: PathBuf,
-        full_path: bool,
-    ) {
-        let normal_prefix = format!("{}│   ", prefix);
-        let last_prefix = format!("{}    ", prefix);
+    /// Depth-first pre-order walk that mirrors the old recursive `_print`, but
+    /// uses an explicit heap-allocated `Vec` as the work stack instead of
+    /// native call-stack recursion. A single input line with many
+    /// `/`-separated components used to overflow the (fixed-size, ~8MB by
+    /// default) native stack and abort the process; the `Vec`-based stack is
+    /// bounded only by available heap memory.
+    ///
+    /// The line-drawing `prefix` and the accumulated `path_buf` are each grown
+    /// and shrunk in place (push on descent, truncate/pop on return) instead
+    /// of being rebuilt from scratch at every level. The old code allocated a
+    /// fresh, full-length copy of both at every level, which is O(depth) work
+    /// per level and therefore O(depth^2) total for a single deep chain;
+    /// mutating in place makes each step O(1) amortized, so the whole
+    /// traversal is O(depth) (well, O(number of nodes): the tie-breaker for a
+    /// wide, shallow tree is still the number of entries, as it always was).
+    ///
+    /// `path_buf.push()` is used instead of `Path::join()` for descending, but
+    /// they are equivalent here: both replace the whole accumulated path when
+    /// the pushed component is itself absolute, which is exactly the behavior
+    /// relied on to print a single collapsed line for an absolute input path
+    /// all the way from `/`. Since a path component can only be absolute as
+    /// the very first component of a line (see `PathTrie::insert`), that
+    /// "replace" case can only trigger while `path_buf` is still empty, so it
+    /// never conflicts with anything already pushed onto the shared buffer.
+    fn print_tree(&self, top_join_with_parent: bool, lscolors: &LsColors, top_path: PathBuf, full_path: bool) {
+        struct Frame<'t> {
+            iter: std::collections::btree_map::Iter<'t, PathBuf, PathTrie>,
+            len: usize,
+            next_idx: usize,
+            top: bool,
+            join_with_parent: bool,
+            // Length/depth `prefix`/`path_buf` should be restored to before
+            // handling the next item yielded by this frame's iterator.
+            prefix_len: usize,
+            path_depth: usize,
+        }
 
-        for (idx, (path, it)) in self.trie.iter().enumerate() {
-            let current_path = parent_path.join(path);
-            let style = ansi_style_for_path(&lscolors, &current_path);
+        let mut prefix = String::new();
+        let mut path_buf = top_path;
+        let mut path_buf_depth = 0usize;
 
+        let mut stack: Vec<Frame> = vec![Frame {
+            iter: self.trie.iter(),
+            len: self.trie.len(),
+            next_idx: 0,
+            top: true,
+            join_with_parent: top_join_with_parent,
+            prefix_len: 0,
+            path_depth: 0,
+        }];
+
+        while let Some(frame) = stack.last_mut() {
+            prefix.truncate(frame.prefix_len);
+            while path_buf_depth > frame.path_depth {
+                path_buf.pop();
+                path_buf_depth -= 1;
+            }
+
+            let Some((path, it)) = frame.iter.next() else {
+                stack.pop();
+                continue;
+            };
+
+            let is_last = frame.next_idx == frame.len - 1;
+            frame.next_idx += 1;
+            let top = frame.top;
+            let join_with_parent = frame.join_with_parent;
+            let base_prefix_len = frame.prefix_len;
+            // `path_buf` still holds this frame's own path (nothing has been
+            // pushed for the current item yet).
+            let parent_is_root = path_buf.as_path() == Path::new("/");
+            // `frame` (and its borrow of `stack`) is not used again below,
+            // which lets us push a new frame onto `stack` further down.
+
+            path_buf.push(path);
+            path_buf_depth += 1;
+
+            let style = ansi_style_for_path(lscolors, &path_buf);
             let contains_singleton_dir = it.contains_singleton_dir();
 
             let painted = match full_path {
                 false => style.paint(escape_control(&path.to_string_lossy())),
                 true => match contains_singleton_dir && !join_with_parent {
-                    false => style.paint(escape_control(&current_path.to_string_lossy())),
+                    false => style.paint(escape_control(&path_buf.to_string_lossy())),
                     true => style.paint(String::new()),
                 },
             };
@@ -103,38 +183,36 @@ impl PathTrie {
                 || !full_path;
 
             let newline = if contains_singleton_dir { "" } else { "\n" };
-            let is_last = idx == self.trie.len() - 1;
 
-            let next_prefix = if join_with_parent {
-                let joiner = if full_path || top || parent_path == PathBuf::from("/") {
-                    ""
-                } else {
-                    "/"
-                };
+            let (child_prefix_len, child_join_with_parent) = if join_with_parent {
+                let joiner = if full_path || top || parent_is_root { "" } else { "/" };
                 if should_print {
                     print!("{}{}{}", style.paint(joiner), painted, newline);
                 }
-                prefix
+                (base_prefix_len, contains_singleton_dir)
             } else if !is_last {
                 if should_print {
                     print!("{}├── {}{}", prefix, painted, newline);
                 }
-                &normal_prefix
+                prefix.push_str("│   ");
+                (prefix.len(), contains_singleton_dir)
             } else {
                 if should_print {
                     print!("{}└── {}{}", prefix, painted, newline);
                 }
-                &last_prefix
+                prefix.push_str("    ");
+                (prefix.len(), contains_singleton_dir)
             };
 
-            it._print(
-                false,
-                next_prefix,
-                contains_singleton_dir,
-                lscolors,
-                current_path,
-                full_path,
-            )
+            stack.push(Frame {
+                iter: it.trie.iter(),
+                len: it.trie.len(),
+                next_idx: 0,
+                top: false,
+                join_with_parent: child_join_with_parent,
+                prefix_len: child_prefix_len,
+                path_depth: path_buf_depth,
+            });
         }
     }
 
@@ -153,25 +231,26 @@ impl PathTrie {
             println!("{}", style.paint(current_path.to_string_lossy()));
         }
 
-        self._print(
-            true,
-            "",
-            contains_singleton_dir,
-            &lscolors,
-            current_path,
-            full_path,
-        )
+        self.print_tree(contains_singleton_dir, lscolors, current_path, full_path)
     }
 }
 
-fn drain_input_to_path_trie<T: BufRead>(input: &mut T, max_level: Option<usize>) -> PathTrie {
+fn drain_input_to_path_trie<T: BufRead>(
+    input: &mut T,
+    max_level: Option<usize>,
+) -> io::Result<PathTrie> {
     let mut trie = PathTrie::default();
 
-    for path_buf in input.lines().filter_map(Result::ok).map(PathBuf::from) {
-        trie.insert(&path_buf, max_level)
+    // Stop on the first read error instead of silently filtering it out.
+    // A reader that errors without ever reaching EOF (e.g. a directory fd,
+    // which returns EISDIR on every read) makes `filter_map(Result::ok)`
+    // spin forever re-polling the same failing read -- an unbounded, silent
+    // hang rather than a report of what went wrong.
+    for line in input.lines() {
+        trie.insert(&PathBuf::from(line?), max_level);
     }
 
-    trie
+    Ok(trie)
 }
 
 /// Restore the default `SIGPIPE` handler so as-tree behaves like a normal Unix
@@ -207,7 +286,7 @@ fn main() -> io::Result<()> {
             let mut reader = BufReader::new(file);
             drain_input_to_path_trie(&mut reader, options.max_level)
         }
-    };
+    }?;
 
     let lscolors = match &options.colorize {
         options::Colorize::Always => LsColors::from_env().unwrap_or_default(),
