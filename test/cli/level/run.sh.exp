@@ -1,0 +1,24 @@
+----- -L 1 -----
+.
+├── docs
+└── src
+----- -L 2 -----
+.
+├── docs
+│   └── guide.md
+└── src
+    ├── bin
+    └── lib
+----- -L 3 -----
+.
+├── docs
+│   └── guide.md
+└── src
+    ├── bin
+    │   └── main.rs
+    └── lib
+        ├── a.rs
+        └── b.rs
+----- -L 2 collapse boundary -----
+a
+└── b

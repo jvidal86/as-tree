@@ -52,9 +52,14 @@ impl PathTrie {
         self.trie.len() == 1 && !self.trie.iter().next().unwrap().1.trie.is_empty()
     }
 
-    pub fn insert(&mut self, path: &Path) {
+    // Insert a path, keeping at most `max_level` components from the top.
+    // `None` inserts the whole path (unlimited depth).
+    pub fn insert(&mut self, path: &Path, max_level: Option<usize>) {
         let mut cur = self;
-        for comp in path.iter() {
+        for (depth, comp) in path.iter().enumerate() {
+            if matches!(max_level, Some(max) if depth >= max) {
+                break;
+            }
             cur = cur
                 .trie
                 .entry(PathBuf::from(comp))
@@ -159,11 +164,11 @@ impl PathTrie {
     }
 }
 
-fn drain_input_to_path_trie<T: BufRead>(input: &mut T) -> PathTrie {
+fn drain_input_to_path_trie<T: BufRead>(input: &mut T, max_level: Option<usize>) -> PathTrie {
     let mut trie = PathTrie::default();
 
     for path_buf in input.lines().filter_map(Result::ok).map(PathBuf::from) {
-        trie.insert(&path_buf)
+        trie.insert(&path_buf, max_level)
     }
 
     trie
@@ -177,12 +182,12 @@ fn main() -> io::Result<()> {
             if atty::is(atty::Stream::Stdin) {
                 eprintln!("Warning: reading from stdin, which is a tty.");
             }
-            drain_input_to_path_trie(&mut io::stdin().lock())
+            drain_input_to_path_trie(&mut io::stdin().lock(), options.max_level)
         }
         Some(filename) => {
             let file = File::open(filename)?;
             let mut reader = BufReader::new(file);
-            drain_input_to_path_trie(&mut reader)
+            drain_input_to_path_trie(&mut reader, options.max_level)
         }
     };
 
@@ -205,7 +210,8 @@ fn main() -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::escape_control;
+    use super::{escape_control, PathTrie};
+    use std::path::PathBuf;
 
     #[test]
     fn leaves_printable_text_untouched() {
@@ -224,5 +230,31 @@ mod tests {
         assert_eq!(escape_control("REAL\rFAKE"), "REAL\\rFAKE"); // CR
         assert_eq!(escape_control("x\u{7f}y"), "x\\u{7f}y"); // DEL
         assert!(!escape_control("\u{1b}]0;title\u{7}").contains('\u{1b}'));
+    }
+
+    // Length of the longest chain of nodes = number of path components kept.
+    fn levels(trie: &PathTrie) -> usize {
+        trie.trie.values().map(|c| 1 + levels(c)).max().unwrap_or(0)
+    }
+
+    #[test]
+    fn insert_unlimited_keeps_all_components() {
+        let mut trie = PathTrie::default();
+        trie.insert(&PathBuf::from("a/b/c/d"), None);
+        assert_eq!(levels(&trie), 4);
+    }
+
+    #[test]
+    fn insert_truncates_to_max_level() {
+        let mut trie = PathTrie::default();
+        trie.insert(&PathBuf::from("a/b/c/d"), Some(2));
+        assert_eq!(levels(&trie), 2);
+    }
+
+    #[test]
+    fn max_level_larger_than_depth_is_unlimited() {
+        let mut trie = PathTrie::default();
+        trie.insert(&PathBuf::from("a/b/c/d"), Some(99));
+        assert_eq!(levels(&trie), 4);
     }
 }
