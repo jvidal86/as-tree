@@ -9,8 +9,8 @@ test means the issue is **still present**.
 AS_TREE_BIN=/path/to/as-tree ./test/security/arg_panic.sh # test a prebuilt binary
 ```
 
-A script exits `0` only when its finding is resolved. These are standalone
-scripts and are intentionally **not** wired into `bazel test //test`.
+A script exits `0` only when its finding is resolved. They are standalone shell
+scripts (separate from `cargo test`), and CI runs them on every push.
 
 ## `arg_panic.sh` — argument-parsing panic (resolved)
 

@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Build & test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: cargo build --verbose
+
+      - name: Test
+        run: cargo test --verbose
+
+      - name: Clippy
+        run: cargo clippy --all-targets
+
+      - name: Security regression tests
+        env:
+          AS_TREE_BIN: ${{ github.workspace }}/target/debug/as-tree
+        run: |
+          ./test/security/arg_panic.sh
+          ./test/security/escape_injection.sh
+
+  audit:
+    name: cargo audit (advisory)
+    runs-on: ubuntu-latest
+    # Advisory only: known atty / ansi_term advisories are tracked; don't block CI.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit
+        run: cargo audit

@@ -1,6 +1,6 @@
 # as-tree
 
-[![CI](https://github.com/jvidal86/as-tree/actions/workflows/rust.yml/badge.svg)](https://github.com/jvidal86/as-tree/actions/workflows/rust.yml)
+[![CI](https://github.com/jvidal86/as-tree/actions/workflows/ci.yml/badge.svg)](https://github.com/jvidal86/as-tree/actions/workflows/ci.yml)
 
 **Print a list of paths as a tree of paths.**
 
@@ -61,12 +61,12 @@ wget -qO- https://raw.githubusercontent.com/jvidal86/as-tree/master/install.sh |
 cargo install -f --git https://github.com/jvidal86/as-tree
 ```
 
-### From source (Bazel)
+Or from a local clone:
 
 ```shell
 git clone https://github.com/jvidal86/as-tree
 cd as-tree
-make install
+make install    # == cargo install --path .
 ```
 
 ## Usage
@@ -149,52 +149,44 @@ test/fixture/a.txt
 
 ## Developing
 
-Running the tests requires Bazel. The `./bazel` shell script in this repo will
-download and cache a specific version of Bazel for you; Bazel then installs
-everything else it needs (including a Rust toolchain).
+Everything is driven by Cargo — build, test, lint, and audit:
 
 ```shell
-# Run the tests:
-./bazel test --test_output=errors //test
-
-# Update the golden test output after an intentional change:
-./bazel test //test:update
+cargo build            # build
+cargo test             # run all tests
+cargo clippy           # lint
+cargo audit            # check dependencies for advisories (cargo install cargo-audit)
 ```
 
-Tests come in two flavors:
+Tests live in two places:
 
-- **Fixture tests** (`test/fixture/foo.txt` + `foo.txt.exp`) — the `.txt` is the
-  input fed to `as-tree`, the `.exp` is the expected output.
-- **CLI tests** (`test/cli/<name>/run.sh` + `run.sh.exp`) — a shell script that
-  invokes `as-tree` with flags (this is how `-L`, `-f`, and `--color` are
-  covered), diffed against its `.exp`.
+- **`tests/integration.rs`** — end-to-end tests that run the built binary.
+  `fixtures` replays every `test/fixture/<name>.txt` and compares stdout to the
+  checked-in `<name>.txt.exp` golden file; the rest pin specific CLI behavior
+  (`-L`, `-f`, `--color`, `--version`, error handling) with deterministic input.
+- **`test/security/*.sh`** — standalone security regression scripts
+  (`arg_panic.sh`, `escape_injection.sh`) that build via Cargo and assert the
+  hardened behavior. CI runs them too.
 
-When you add a dependency, regenerate the Bazel build files:
-
-```shell
-cargo install cargo-raze   # one-time setup
-cd third_party/cargo
-cargo raze
-```
+To add a fixture, drop `test/fixture/foo.txt` and its expected output
+`test/fixture/foo.txt.exp`; the `fixtures` test picks it up automatically.
 
 ### Releasing
 
-Pushing a tag builds the prebuilt binaries and publishes them as a GitHub
-release (see [`.github/workflows/release.yml`](.github/workflows/release.yml)),
-which is what the quick installer downloads:
+`./tools/scripts/release.sh <version>` bumps the version, commits, tags, and
+pushes to the fork. Pushing the tag triggers
+[`.github/workflows/release.yml`](.github/workflows/release.yml), which builds
+`linux`/`macos` × `x86_64`/`aarch64` and uploads the `as-tree-<os>-<arch>.tar.gz`
+assets that the quick installer downloads.
 
 ```shell
-git tag 0.13.0
-git push origin 0.13.0
+./tools/scripts/release.sh 0.14.0
 ```
-
-The workflow builds `linux`/`macos` × `x86_64`/`aarch64` and uploads the
-`as-tree-<os>-<arch>.tar.gz` assets.
 
 ## Roadmap
 
+- [x] Prebuilt release binaries + `wget` installer.
 - [ ] Publish to crates.io (`cargo install as-tree`).
-- [ ] Publish prebuilt release binaries (so the quick installer works out of the box).
 - [ ] Only use box-drawing characters when the locale supports them (`LC_CTYPE=C`).
 - [ ] A `-0` flag for NUL-separated input, to support paths containing newlines.
 

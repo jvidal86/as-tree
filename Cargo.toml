@@ -20,14 +20,3 @@ atty = "0.2"
 [profile.release]
 lto = true
 panic = "abort"
-
-[raze]
-# The WORKSPACE relative path to the Cargo.toml working directory.
-workspace_path = "//third_party/cargo"
-
-# TODO(jez) Why is this needed?
-# The target to generate BUILD rules for.
-target = "x86_64-apple-darwin"
-
-# Let bazel fetch things, rather than vendor them with cargo
-genmode = "Remote"

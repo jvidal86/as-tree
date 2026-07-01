@@ -1,0 +1,131 @@
+//! End-to-end tests for the `as-tree` binary, run by `cargo test`.
+//!
+//! - `fixtures` replays every `test/fixture/*.txt` through the binary and
+//!   compares stdout to the checked-in `.exp` golden file (this replaces the
+//!   old Bazel fixture tests).
+//! - The remaining tests pin specific CLI behavior with deterministic,
+//!   piped input (no `find`, no filesystem coloring).
+
+use std::io::Write;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+
+/// Path to the binary under test, provided by Cargo for integration tests.
+const BIN: &str = env!("CARGO_BIN_EXE_as-tree");
+
+fn manifest_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+struct Run {
+    stdout: String,
+    stderr: String,
+    code: i32,
+}
+
+/// Run the binary with `args`, feeding `stdin`, and capture the result.
+fn run(args: &[&str], stdin: &str) -> Run {
+    let mut child = Command::new(BIN)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn as-tree");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    Run {
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        code: out.status.code().unwrap_or(-1),
+    }
+}
+
+#[test]
+fn fixtures() {
+    let dir = manifest_dir().join("test/fixture");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&dir).expect("read test/fixture") {
+        let input = entry.unwrap().path();
+        if input.extension().and_then(|e| e.to_str()) != Some("txt") {
+            continue; // skip the .exp golden files
+        }
+        let exp = PathBuf::from(format!("{}.exp", input.display()));
+        let expected = std::fs::read_to_string(&exp)
+            .unwrap_or_else(|_| panic!("missing golden file {exp:?}"));
+        // The fixture file is passed as the filename argument.
+        let got = run(&[input.to_str().unwrap()], "").stdout;
+        assert_eq!(got, expected, "fixture mismatch for {input:?}");
+        checked += 1;
+    }
+    assert!(checked > 0, "no fixtures were found in {dir:?}");
+}
+
+#[test]
+fn version_matches_crate() {
+    let v = env!("CARGO_PKG_VERSION");
+    assert_eq!(run(&["-v"], "").stdout.trim(), v);
+    assert_eq!(run(&["--version"], "").stdout.trim(), v);
+}
+
+#[test]
+fn help_lists_options() {
+    let out = run(&["--help"], "");
+    assert_eq!(out.code, 0);
+    assert!(out.stdout.contains("Usage:"));
+    assert!(out.stdout.contains("-L <level>"));
+    assert!(out.stdout.contains("-f"));
+}
+
+#[test]
+fn level_limits_depth() {
+    let input = "a/b/c\na/b/d\n";
+    assert_eq!(run(&["-L", "1", "--color", "never"], input).stdout, ".\n└── a\n");
+    // At the truncation boundary the collapsed chain splits: `a` then `b`.
+    assert_eq!(run(&["-L", "2", "--color", "never"], input).stdout, "a\n└── b\n");
+}
+
+#[test]
+fn full_path_prefixes_entries() {
+    let out = run(&["-f", "--color", "never"], "src/lib/a.rs\nsrc/lib/b.rs\n");
+    assert!(out.stdout.contains("./src/lib/a.rs"), "got:\n{}", out.stdout);
+    assert!(out.stdout.contains("./src/lib/b.rs"), "got:\n{}", out.stdout);
+}
+
+#[test]
+fn color_never_emits_no_escape_bytes() {
+    // Security-relevant: control bytes in a path must not reach stdout raw.
+    let out = run(&["--color", "never"], "safe/\u{1b}[31mevil\u{1b}[0m/leaf\n");
+    assert!(!out.stdout.contains('\u{1b}'), "escape byte leaked: {:?}", out.stdout);
+}
+
+#[test]
+fn rejects_bad_level() {
+    for bad in ["0", "abc", "-1"] {
+        let out = run(&["-L", bad], "a/b\n");
+        assert_eq!(out.code, 1, "-L {bad} should exit 1");
+        assert!(out.stderr.contains("level"), "-L {bad} stderr: {}", out.stderr);
+    }
+    // Missing value.
+    assert_eq!(run(&["-L"], "").code, 1);
+}
+
+#[test]
+fn rejects_unknown_flag() {
+    let out = run(&["--bogus"], "");
+    assert_eq!(out.code, 1);
+    assert!(out.stderr.contains("Unrecognized"));
+}
+
+#[test]
+fn non_ascii_filename_arg_does_not_panic() {
+    // Regression for the byte-slice arg panic: a multi-byte leading char must
+    // not crash (exit 101). It should fail cleanly opening the missing file.
+    let out = run(&["ñope-nonexistent.txt"], "");
+    assert_ne!(out.code, 101, "panicked on non-ASCII arg: {}", out.stderr);
+}
