@@ -2,6 +2,7 @@ extern crate ansi_term;
 extern crate atty;
 extern crate lscolors;
 
+use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
@@ -10,6 +11,20 @@ use std::path::{Path, PathBuf};
 use lscolors::{LsColors, Style};
 
 pub mod options;
+
+/// Hard ceiling on the number of distinct trie nodes (roughly, distinct
+/// path-component-at-a-depth combinations) as-tree will build before refusing
+/// to continue. Memory usage is driven by this number, not by input file
+/// size: a small, heavily-shared-prefix input can be far cheaper than a large
+/// one, and a small adversarial input (e.g. one line with many `/`-separated
+/// components and no sharing at all) can be far more expensive. At roughly
+/// 700 bytes/node in the worst (zero-sharing) case, this bounds peak memory
+/// to roughly 1.4GB regardless of how the input is shaped -- generously above
+/// any realistic `find`/`fd` output (real trees share directory prefixes
+/// heavily, so actual node counts run far below raw file counts), while still
+/// giving a small, easily-crafted input a hard ceiling on how much memory it
+/// can force the process to use.
+const MAX_TRIE_NODES: usize = 2_000_000;
 
 #[derive(Debug, Default)]
 pub struct PathTrie {
@@ -71,18 +86,40 @@ impl PathTrie {
     }
 
     // Insert a path, keeping at most `max_level` components from the top.
-    // `None` inserts the whole path (unlimited depth).
-    pub fn insert(&mut self, path: &Path, max_level: Option<usize>) {
+    // `None` inserts the whole path (unlimited depth). Refuses (returning an
+    // error instead of continuing) once `*node_count` -- the number of
+    // distinct nodes created across the whole trie, not just this call --
+    // would exceed `max_nodes`. Checked per component, not just per call, so
+    // that a single pathological line (many components, all distinct) can't
+    // blow past the limit within one `insert` before the caller gets a
+    // chance to stop.
+    pub fn insert(
+        &mut self,
+        path: &Path,
+        max_level: Option<usize>,
+        max_nodes: usize,
+        node_count: &mut usize,
+    ) -> io::Result<()> {
         let mut cur = self;
         for (depth, comp) in path.iter().enumerate() {
             if matches!(max_level, Some(max) if depth >= max) {
                 break;
             }
-            cur = cur
-                .trie
-                .entry(PathBuf::from(comp))
-                .or_insert_with(PathTrie::default);
+            cur = match cur.trie.entry(PathBuf::from(comp)) {
+                Entry::Occupied(e) => e.into_mut(),
+                Entry::Vacant(e) => {
+                    *node_count += 1;
+                    if *node_count > max_nodes {
+                        return Err(io::Error::other(format!(
+                            "input produces more than {max_nodes} distinct path entries; \
+                             refusing to continue (this is a safety limit, not a crash)"
+                        )));
+                    }
+                    e.insert(PathTrie::default())
+                }
+            };
         }
+        Ok(())
     }
 
     /// Depth-first pre-order walk that mirrors the old recursive `_print`, but
@@ -240,6 +277,7 @@ fn drain_input_to_path_trie<T: BufRead>(
     max_level: Option<usize>,
 ) -> io::Result<PathTrie> {
     let mut trie = PathTrie::default();
+    let mut node_count = 0usize;
 
     // Stop on the first read error instead of silently filtering it out.
     // A reader that errors without ever reaching EOF (e.g. a directory fd,
@@ -247,7 +285,7 @@ fn drain_input_to_path_trie<T: BufRead>(
     // spin forever re-polling the same failing read -- an unbounded, silent
     // hang rather than a report of what went wrong.
     for line in input.lines() {
-        trie.insert(&PathBuf::from(line?), max_level);
+        trie.insert(&PathBuf::from(line?), max_level, MAX_TRIE_NODES, &mut node_count)?;
     }
 
     Ok(trie)
@@ -307,7 +345,8 @@ fn main() -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{escape_control, PathTrie};
+    use super::{escape_control, PathTrie, MAX_TRIE_NODES};
+    use std::io;
     use std::path::PathBuf;
 
     #[test]
@@ -337,21 +376,53 @@ mod tests {
     #[test]
     fn insert_unlimited_keeps_all_components() {
         let mut trie = PathTrie::default();
-        trie.insert(&PathBuf::from("a/b/c/d"), None);
+        let mut count = 0;
+        trie.insert(&PathBuf::from("a/b/c/d"), None, MAX_TRIE_NODES, &mut count)
+            .unwrap();
         assert_eq!(levels(&trie), 4);
     }
 
     #[test]
     fn insert_truncates_to_max_level() {
         let mut trie = PathTrie::default();
-        trie.insert(&PathBuf::from("a/b/c/d"), Some(2));
+        let mut count = 0;
+        trie.insert(&PathBuf::from("a/b/c/d"), Some(2), MAX_TRIE_NODES, &mut count)
+            .unwrap();
         assert_eq!(levels(&trie), 2);
     }
 
     #[test]
     fn max_level_larger_than_depth_is_unlimited() {
         let mut trie = PathTrie::default();
-        trie.insert(&PathBuf::from("a/b/c/d"), Some(99));
+        let mut count = 0;
+        trie.insert(&PathBuf::from("a/b/c/d"), Some(99), MAX_TRIE_NODES, &mut count)
+            .unwrap();
         assert_eq!(levels(&trie), 4);
+    }
+
+    #[test]
+    fn insert_refuses_past_max_nodes() {
+        let mut trie = PathTrie::default();
+        let mut count = 0;
+        // "a/b/c/d" creates 4 distinct nodes; a budget of 3 must reject it
+        // partway through, without silently truncating or panicking.
+        let err = trie
+            .insert(&PathBuf::from("a/b/c/d"), None, 3, &mut count)
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert!(count <= 4, "count should not run away past the input size: {count}");
+    }
+
+    #[test]
+    fn insert_stays_within_budget_across_calls() {
+        // The budget is shared across multiple insert() calls (multiple
+        // input lines), not reset each time -- otherwise a file with many
+        // lines could bypass the limit entirely.
+        let mut trie = PathTrie::default();
+        let mut count = 0;
+        trie.insert(&PathBuf::from("a"), None, 2, &mut count).unwrap();
+        trie.insert(&PathBuf::from("b"), None, 2, &mut count).unwrap();
+        let err = trie.insert(&PathBuf::from("c"), None, 2, &mut count).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Other);
     }
 }

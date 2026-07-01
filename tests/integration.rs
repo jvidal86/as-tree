@@ -82,6 +82,29 @@ fn deeply_nested_single_line_does_not_crash() {
 }
 
 #[test]
+fn oversized_input_is_rejected_cleanly_not_oom() {
+    // Regression / safety-net test for the MAX_TRIE_NODES cap: even after
+    // fixing the stack overflow and O(depth^2) blowup above, a sufficiently
+    // large *adversarial* input would still grow the process without limit
+    // (bounded memory growth is not the same as *bounded memory*). Feed one
+    // line with more distinct components than the real production limit
+    // (2,000,000) and confirm the process fails promptly and cleanly --
+    // not a crash/abort, not a hang, not multi-GB of memory -- rather than
+    // being left to grow until the OS OOM-kills it (or something else on
+    // the machine).
+    let huge = std::iter::repeat("a").take(2_500_000).collect::<Vec<_>>().join("/");
+    let out = run(&["--color", "never"], &format!("{huge}\n"));
+    assert_ne!(out.code, 101, "panicked: {}", out.stderr);
+    assert_ne!(out.code, 134, "aborted: {}", out.stderr);
+    assert_eq!(out.code, 1, "expected a clean rejection, got: {}", out.stderr);
+    assert!(
+        out.stderr.contains("distinct path entries"),
+        "expected the safety-limit message, got: {}",
+        out.stderr
+    );
+}
+
+#[test]
 fn directory_as_filename_does_not_hang() {
     // Regression: a directory fd returns EISDIR on every read, never Ok(0)
     // (EOF). `input.lines().filter_map(Result::ok)` used to silently discard
