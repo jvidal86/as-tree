@@ -35,6 +35,9 @@ pub struct Options {
     pub filename: Option<String>,
     pub colorize: Colorize,
     pub full_path: bool,
+    // Maximum tree depth to print, counted in path components from the top.
+    // None means unlimited.
+    pub max_level: Option<usize>,
 }
 
 const USAGE: &str = "\
@@ -50,6 +53,7 @@ Options:
   --color (always|auto|never)
                     Whether to colorize the output [default: auto]
   -f                Prints the full path prefix for each file.
+  -L <level>        Descend only <level> levels deep (must be > 0)
   -h, --help        Print this help message
   -v, --version     Print the version and exit
 
@@ -99,6 +103,18 @@ pub fn parse_options_or_die() -> Options {
                 }
             } else {
                 die("-> Unrecognized option:", &arg);
+            }
+            continue;
+        }
+
+        if arg == "-L" {
+            match argv.next() {
+                Some(level) => match level.parse::<usize>() {
+                    Ok(n) if n > 0 => options.max_level = Some(n),
+                    Ok(_) => die("Invalid level, must be greater than 0:", &level),
+                    Err(_) => die("Invalid level for -L:", &level),
+                },
+                None => die("Missing value for -L:", &arg),
             }
             continue;
         }
