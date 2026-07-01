@@ -174,7 +174,25 @@ fn drain_input_to_path_trie<T: BufRead>(input: &mut T, max_level: Option<usize>)
     trie
 }
 
+/// Restore the default `SIGPIPE` handler so as-tree behaves like a normal Unix
+/// filter: when a downstream reader closes the pipe early (e.g. `as-tree | head`)
+/// it exits quietly instead of panicking on the failed stdout write. Rust
+/// installs `SIG_IGN` for `SIGPIPE` at startup and surfaces the broken pipe as an
+/// `io::Error`, which `print!` turns into a panic.
+#[cfg(unix)]
+fn reset_sigpipe() {
+    // Safety: resetting a signal to its default disposition is async-signal-safe,
+    // and this runs at the very start of `main`, before any output or threads.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
+#[cfg(not(unix))]
+fn reset_sigpipe() {}
+
 fn main() -> io::Result<()> {
+    reset_sigpipe();
     let options = options::parse_options_or_die();
 
     let trie = match &options.filename {

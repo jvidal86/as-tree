@@ -6,7 +6,7 @@
 //! - The remaining tests pin specific CLI behavior with deterministic,
 //!   piped input (no `find`, no filesystem coloring).
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -118,6 +118,47 @@ fn rejects_unknown_flag() {
     let out = run(&["--bogus"], "");
     assert_eq!(out.code, 1);
     assert!(out.stderr.contains("Unrecognized"));
+}
+
+#[test]
+#[cfg(unix)]
+fn broken_pipe_does_not_panic() {
+    // Reproduce `as-tree | head`: a reader that closes the pipe after a few
+    // bytes. Without the SIGPIPE reset, the next stdout write panics
+    // ("failed printing to stdout: Broken pipe"). With it, as-tree exits quietly.
+    // Big input so as-tree is still writing when we close the read end.
+    let input: String = (0..200_000).map(|i| format!("path{i}\n")).collect();
+
+    let mut child = Command::new(BIN)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn as-tree");
+
+    // Feed stdin from a thread (as-tree reads all input before printing).
+    let mut stdin = child.stdin.take().unwrap();
+    let writer = std::thread::spawn(move || {
+        let _ = stdin.write_all(input.as_bytes());
+    });
+
+    // Read a little, then close our read end -> as-tree gets SIGPIPE on next write.
+    let mut stdout = child.stdout.take().unwrap();
+    let mut buf = [0u8; 64];
+    let _ = stdout.read(&mut buf);
+    drop(stdout);
+
+    let status = child.wait().unwrap();
+    let mut stderr = String::new();
+    child.stderr.take().unwrap().read_to_string(&mut stderr).ok();
+    let _ = writer.join();
+
+    assert!(
+        !stderr.contains("panicked"),
+        "as-tree panicked on a broken pipe:\n{stderr}"
+    );
+    // 101 is Rust's unwind-panic exit code (test/debug build uses panic=unwind).
+    assert_ne!(status.code(), Some(101), "as-tree panicked on a broken pipe");
 }
 
 #[test]
