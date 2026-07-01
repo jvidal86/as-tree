@@ -7,8 +7,10 @@ load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 http_archive(
     name = "com_grail_bazel_toolchain",
     url = "https://github.com/grailbio/bazel-toolchain/archive/f2d1ba2c9d713b2aa6e7063f6d11dd3d64aa402a.zip",
-    sha256 = "0246482b21a04667825c655d3b4f8f796d842817b2e11f536bbfed5673cbfd97",
-    strip_prefix = "bazel-toolchain-f2d1ba2c9d713b2aa6e7063f6d11dd3d64aa402a",
+    sha256 = "f03728e32a893abc7b41a283c8943cd10a6082687aa5079b56e9f7e43010fdcc",
+    # grailbio/bazel-toolchain was renamed to toolchains_llvm, so the archive's
+    # top-level directory (strip_prefix) changed accordingly.
+    strip_prefix = "toolchains_llvm-f2d1ba2c9d713b2aa6e7063f6d11dd3d64aa402a",
 )
 
 load("@com_grail_bazel_toolchain//toolchain:deps.bzl", "bazel_toolchain_dependencies")
