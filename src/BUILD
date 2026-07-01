@@ -10,5 +10,5 @@ rust_binary(
         "//third_party/cargo:atty",
     ],
     visibility = ["//visibility:public"],
-    version = "0.12.0",
+    version = "0.13.0",
 )
